@@ -1,0 +1,14 @@
+# Virtual environment
+venv/
+
+# Datasets and large TIF files
+*.tif
+*.tiff
+*.SAFE
+*.h5
+data/
+
+# Python cache and IDE files
+__pycache__/
+.DS_Store
+.vscode/
