@@ -1,0 +1,8 @@
+numpy
+scipy
+lxml
+pyyaml
+rasterio
+matplotlib
+pytest
+torch
