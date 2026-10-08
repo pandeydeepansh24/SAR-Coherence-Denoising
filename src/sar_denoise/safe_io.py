@@ -69,6 +69,10 @@ class SwathInfo:
     bursts: list[Burst] = field(default_factory=list)
     fm_rates: list[TimedPoly] = field(default_factory=list)
     dc_estimates: list[TimedPoly] = field(default_factory=list)
+    slant_range_time: float | None = None        # s, two-way time of sample 0
+    range_sampling_rate: float | None = None     # Hz
+    orbit_times: np.ndarray = field(default_factory=lambda: np.array([], dtype='datetime64[us]'))
+    orbit_speeds: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))  # m/s
 
     def summary(self) -> str:
         rows = [
@@ -84,6 +88,9 @@ class SwathInfo:
             f"azimuth window         : {self.window_type} (coefficient {self.window_coefficient})",
             f"FM-rate records        : {len(self.fm_rates)}",
             f"Doppler-centroid recs  : {len(self.dc_estimates)}",
+            f"slant range time (s0) : {self.slant_range_time} s",
+            f"range sampling rate   : {self.range_sampling_rate} Hz",
+            f"orbit state vectors   : {len(self.orbit_times)}",
         ]
         return "\n".join(rows)
 
@@ -152,6 +159,13 @@ def parse_annotation(xml_path) -> SwathInfo:
             last_valid=np.array(b.findtext("lastValidSample").split(), dtype=int),
         ))
 
+    orbit = []
+    for o in root.findall("generalAnnotation/orbitList/orbit"):
+        v = o.find("velocity")
+        vx, vy, vz = (float(v.findtext(k)) for k in ("x", "y", "z"))
+        orbit.append((np.datetime64(o.findtext("time").strip()), float(np.sqrt(vx**2 + vy**2 + vz**2))))
+    orbit.sort(key=lambda t: t[0])
+
     return SwathInfo(
         swath=_get(root, "adsHeader/swath"),
         polarisation=_get(root, "adsHeader/polarisation"),
@@ -172,6 +186,10 @@ def parse_annotation(xml_path) -> SwathInfo:
                             ("azimuthFmRatePolynomial",)),
         dc_estimates=_poly_list(root, "dopplerCentroid/dcEstimateList/dcEstimate",
                                 ("dataDcPolynomial",)),
+        slant_range_time=_get(root, "imageAnnotation/imageInformation/slantRangeTime", float),
+        range_sampling_rate=_get(root, "generalAnnotation/productInformation/rangeSamplingRate", float),
+        orbit_times=np.array([t for t, _ in orbit], dtype="datetime64[us]"),
+        orbit_speeds=np.array([v for _, v in orbit], dtype=float),
     )
 
 
