@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -44,8 +45,9 @@ class SubLookConfig:
     guard_hz: float = 10.0             # gap between the two bands
     edge_hz: float = 4.0               # cosine ramp at the inner band edges (inside each band)
     split_hz: float = 0.0              # centre of the gap (after demodulation)
-    deweight: bool = True              # divide by the Hamming weighting inside each band
+    deweight: bool = False             # divide by the Hamming weighting inside each band (inflates white noise)
     decimate: int = 2                  # azimuth decimation factor
+    equalize: bool = True              # scale each look so its mean power equals the full-band mean power
 
     @classmethod
     def from_info(cls, info, **overrides) -> "SubLookConfig":
@@ -71,6 +73,7 @@ class SubLooks:
     n_lines_used: int       # input lines used (input length rounded down to a multiple of decimate)
     decimation: int
     cfg: SubLookConfig
+    gains: dict | None = None   # amplitude gains applied by the equalisation, per look and polarisation
 
 
 def hamming_weight(freq: np.ndarray, bandwidth_hz: float, alpha: float) -> np.ndarray:
@@ -138,6 +141,15 @@ def _extract_look(spectrum: np.ndarray, filt: np.ndarray, centre_hz: float, df: 
     return sfft.ifft(z, axis=0, workers=-1) * (n_out / n)
 
 
+def _mean_power(x: np.ndarray, chunk: int = 256) -> float:
+    """Mean |x|^2 in float64, accumulated over row chunks to keep memory small."""
+    total = 0.0
+    for i in range(0, x.shape[0], chunk):
+        c = x[i:i + chunk]
+        total += float(np.sum(c.real.astype(np.float64) ** 2 + c.imag.astype(np.float64) ** 2))
+    return total / x.size
+
+
 def split_sublooks(s_vv: np.ndarray, s_vh: np.ndarray, dt: float,
                    cfg: SubLookConfig | None = None, col_chunk: int = 2048) -> SubLooks:
     """Split deramped, demodulated complex VV and VH into Look A and Look B."""
@@ -168,7 +180,26 @@ def split_sublooks(s_vv: np.ndarray, s_vh: np.ndarray, dt: float,
             for name, (filt, centre) in zip(("a", "b"), filters):
                 out[f"{name}_{pol}"][:, c0:c1] = _extract_look(spec, filt, centre, df, n_out)
 
-    return SubLooks(dt_out=dt * cfg.decimate, n_lines_used=n, decimation=cfg.decimate, cfg=cfg, **out)
+    gains = {k: 1.0 for k in out}
+    if cfg.equalize:
+        # Measured, not modelled: each look gets the mean power of the full-band data of the
+        # same channel. A real gain per channel leaves |coherence| and the VV-VH phase unchanged.
+        for pol, arr in (("vv", s_vv), ("vh", s_vh)):
+            p_full = _mean_power(arr[:n])
+            for name in ("a", "b"):
+                key = f"{name}_{pol}"
+                p_look = _mean_power(out[key])
+                if p_look > 0 and p_full > 0:
+                    g = float(np.sqrt(p_full / p_look))
+                    if not (0.5 <= g <= 2.0):
+                        warnings.warn(f"equalisation gain {g:.2f} for {key} is outside [0.5, 2]; "
+                                      "not applied (is the spectrum very unbalanced?)")
+                        continue
+                    out[key] *= np.float32(g)
+                    gains[key] = g
+
+    return SubLooks(dt_out=dt * cfg.decimate, n_lines_used=n, decimation=cfg.decimate, cfg=cfg,
+                    gains=gains, **out)
 
 
 # ---------------------------------------------------------------- diagnostics
@@ -195,6 +226,26 @@ def speckle_intensity_correlation(a: np.ndarray, b: np.ndarray, win: tuple[int, 
     ok = (ma > 0) & (mb > 0)
     na, nb = ia[ok] / ma[ok], ib[ok] / mb[ok]
     return float(np.corrcoef(na, nb)[0, 1])
+
+
+def c12_speckle_correlation(a_vv, a_vh, b_vv, b_vh, win: tuple[int, int] = (9, 65)) -> float:
+    """|complex correlation| between the C12 speckle of look A and look B.
+
+    C12 = S_vv S_vh* is formed per look, its local mean (boxcar) is removed, and the
+    residuals are correlated. About 0 for independent speckle; larger if the looks
+    share speckle. Scene structure finer than the window also raises it (see the
+    intensity correlation), so compare across guard widths rather than reading one value.
+    """
+    from scipy.ndimage import uniform_filter
+
+    resid = []
+    for vv, vh in ((a_vv, a_vh), (b_vv, b_vh)):
+        c12 = (vv.astype(np.complex64) * np.conj(vh.astype(np.complex64)))
+        mean = uniform_filter(c12.real, size=win, mode="reflect") + 1j * uniform_filter(c12.imag, size=win, mode="reflect")
+        resid.append((c12 - mean).astype(np.complex128))
+    ra, rb = resid
+    den = np.sqrt(np.sum(np.abs(ra) ** 2) * np.sum(np.abs(rb) ** 2))
+    return float(np.abs(np.sum(ra * np.conj(rb))) / den)
 
 
 def noise_factors(n_lines: int, dt: float, cfg: "SubLookConfig | None" = None,
@@ -269,7 +320,9 @@ def main() -> None:
     ap.add_argument("--burst", type=int, default=None)
     ap.add_argument("--cols", type=int, default=4096, help="number of range samples to use (centre of the valid area)")
     ap.add_argument("--guard", type=float, default=None)
-    ap.add_argument("--no-deweight", action="store_true")
+    ap.add_argument("--deweight", action="store_true", help="divide by the Hamming weighting (off by default)")
+    ap.add_argument("--no-deweight", action="store_true", help="kept for compatibility; this is the default")
+    ap.add_argument("--no-equalize", action="store_true", help="do not equalise look power")
     args = ap.parse_args()
 
     blocks = {}
@@ -291,13 +344,17 @@ def main() -> None:
     overrides = {}
     if args.guard is not None:
         overrides["guard_hz"] = args.guard
+    if args.deweight:
+        overrides["deweight"] = True
     if args.no_deweight:
         overrides["deweight"] = False
+    if args.no_equalize:
+        overrides["equalize"] = False
     cfg = SubLookConfig.from_info(info, **overrides)
     (lo_a, hi_a), (lo_b, hi_b) = band_edges(cfg)
     print(f"burst {k}: block {blocks['vv'].shape} (lines x samples), dt {info.azimuth_time_interval * 1e3:.4f} ms")
     print(f"look A band [{lo_a:.1f}, {hi_a:.1f}] Hz, look B band [{lo_b:.1f}, {hi_b:.1f}] Hz, "
-          f"deweight={cfg.deweight}, decimate={cfg.decimate}")
+          f"deweight={cfg.deweight}, equalize={cfg.equalize}, decimate={cfg.decimate}")
 
     sl = split_sublooks(blocks["vv"], blocks["vh"], info.azimuth_time_interval, cfg)
     print(f"output looks: {sl.a_vv.shape}, azimuth step {sl.dt_out * 1e3:.3f} ms "
@@ -307,11 +364,17 @@ def main() -> None:
     for pol, a, b_ in (("VV", sl.a_vv, sl.b_vv), ("VH", sl.a_vh, sl.b_vh)):
         full = np.mean(np.abs(blocks[pol.lower()][:n]) ** 2)
         pa, pb = np.mean(np.abs(a) ** 2), np.mean(np.abs(b_) ** 2)
+        ga, gb = sl.gains[f"a_{pol.lower()}"], sl.gains[f"b_{pol.lower()}"]
+        # power ratios BEFORE the equalisation gains were applied
+        pre_a, pre_b = pa / ga ** 2, pb / gb ** 2
         rho = complex_correlation(a, b_)
         r_int = speckle_intensity_correlation(a, b_)
-        print(f"{pol}: mean power full {_db(full):.2f} dB, A {_db(pa):.2f} dB, B {_db(pb):.2f} dB, "
-              f"A/B {_db(pa / pb):+.2f} dB | |complex corr| {abs(rho):.3f}, speckle intensity corr {r_int:+.3f}")
-        print(f"    mean of the two looks vs full product: {_db((pa + pb) / 2 / full):+.2f} dB")
+        print(f"{pol}: full {_db(full):.2f} dB | before equalisation: A {_db(pre_a):.2f}, B {_db(pre_b):.2f} dB "
+              f"(A/B {_db(pre_a / pre_b):+.2f} dB, mean of looks vs full {_db((pre_a + pre_b) / 2 / full):+.2f} dB)")
+        print(f"    gains applied: A {20 * np.log10(ga):+.2f} dB, B {20 * np.log10(gb):+.2f} dB | "
+              f"after: A {_db(pa):.2f}, B {_db(pb):.2f} dB | |complex corr| {abs(rho):.3f}, "
+              f"speckle intensity corr {r_int:+.3f}")
+    print(f"C12 speckle correlation between looks: {c12_speckle_correlation(sl.a_vv, sl.a_vh, sl.b_vv, sl.b_vh):.3f}")
 
     # shape of the noise spectrum on the darkest VH columns (Hamming-shaped: about -5.7 dB, white: about 0 dB)
     f, pw = dark_column_spectrum(blocks["vh"], info.azimuth_time_interval)

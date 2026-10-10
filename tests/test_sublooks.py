@@ -7,6 +7,7 @@ from sar_denoise.simulate import simulate_dualpol_slc
 from sar_denoise.sublooks import (
     SubLookConfig,
     band_edges,
+    c12_speckle_correlation,
     complex_correlation,
     dark_column_spectrum,
     edge_centre_db,
@@ -52,7 +53,7 @@ def test_bands_are_separated_by_the_guard():
 
 def test_looks_keep_the_input_power_and_are_flat_with_deweighting():
     vv, vh = shaped_dualpol(4.0, 0.5, 0.6 * np.exp(0.7j) * np.sqrt(2.0))
-    sl = split_sublooks(vv, vh, DT, SubLookConfig())
+    sl = split_sublooks(vv, vh, DT, SubLookConfig(deweight=True))
     p_in = np.mean(np.abs(vv) ** 2)
     assert np.mean(np.abs(sl.a_vv) ** 2) == pytest.approx(p_in, rel=0.03)
     assert np.mean(np.abs(sl.b_vv) ** 2) == pytest.approx(p_in, rel=0.03)
@@ -100,7 +101,7 @@ def test_covariance_is_preserved_in_each_look():
 def test_a_tone_ends_up_in_the_right_look():
     t = np.arange(N) * DT
     tone = np.tile(np.exp(2j * np.pi * (-100.0) * t)[:, None], (1, 8))
-    sl = split_sublooks(tone, tone, DT)
+    sl = split_sublooks(tone, tone, DT, SubLookConfig(equalize=False))
     assert np.mean(np.abs(sl.a_vv) ** 2) > 1e3 * np.mean(np.abs(sl.b_vv) ** 2)
 
 
@@ -133,7 +134,9 @@ def test_input_validation():
 def test_config_from_annotation():
     info = SimpleNamespace(processing_bandwidth=313.0, window_coefficient=0.75, window_type="Hamming")
     cfg = SubLookConfig.from_info(info, guard_hz=20.0)
-    assert (cfg.bandwidth_hz, cfg.window_coefficient, cfg.guard_hz, cfg.deweight) == (313.0, 0.75, 20.0, True)
+    assert (cfg.bandwidth_hz, cfg.window_coefficient, cfg.guard_hz) == (313.0, 0.75, 20.0)
+    assert cfg.deweight is False and cfg.equalize is True            # defaults
+    assert SubLookConfig.from_info(info, deweight=True).deweight is True
     other = SimpleNamespace(processing_bandwidth=313.0, window_coefficient=None, window_type="KAISER")
     assert SubLookConfig.from_info(other).deweight is False
 
@@ -148,7 +151,7 @@ def test_filters_have_unit_radiometric_gain_on_white_input():
 def test_noise_factors_window_model_is_unity_and_white_is_larger():
     wa, wb = noise_factors(N, DT, SubLookConfig(), "window")
     assert wa == pytest.approx(1.0, rel=1e-6) and wb == pytest.approx(1.0, rel=1e-6)
-    ha, hb = noise_factors(N, DT, SubLookConfig(), "white")
+    ha, hb = noise_factors(N, DT, SubLookConfig(deweight=True), "white")
     # mean(w^2) * mean(1/w^2) = 0.594 * 2.121 = 1.26 for Hamming 0.75
     assert 1.2 < ha < 1.32 and 1.2 < hb < 1.32
     # without de-weighting, each look keeps about its share of white noise: factor close to 1
@@ -165,9 +168,9 @@ def test_noise_factors_match_what_split_sublooks_does_to_noise():
     f = np.fft.fftfreq(N, d=DT)
     inband = (np.abs(f) <= B / 2)[:, None]
     noise = np.fft.ifft(np.fft.fft(white, axis=0) * inband, axis=0)       # white inside the band
-    sl = split_sublooks(noise, noise, DT)
     fa, fb = noise_factors(N, DT, SubLookConfig(), "white")
     p_in = np.mean(np.abs(noise) ** 2)
+    sl = split_sublooks(noise, noise, DT, SubLookConfig(equalize=False))
     assert np.mean(np.abs(sl.a_vv) ** 2) / p_in == pytest.approx(fa, rel=0.04)
     assert np.mean(np.abs(sl.b_vv) ** 2) / p_in == pytest.approx(fb, rel=0.04)
 
@@ -188,3 +191,60 @@ def test_dark_column_spectrum_distinguishes_white_from_window_shaped_noise():
     mixed = np.concatenate([10.0 * shaped(200, w), shaped(200, inband.astype(float))], axis=1)
     freq, power = dark_column_spectrum(mixed, DT, fraction=0.4)
     assert -1.0 < edge_centre_db(freq, power, B) < 1.0
+
+
+def _tilted(c11, c22, c12, tilt, seed=0):
+    """Shaped dual-pol data whose power spectrum is tilted: PSD ~ w^2 * (1 + tilt * f / (B/2))."""
+    rng = np.random.default_rng(seed)
+    vv, vh = simulate_dualpol_slc(c11, c22, c12, (N, COLS), rng)
+    f = np.fft.fftfreq(N, d=DT)
+    amp = (hamming_weight(f, B, ALPHA) * np.sqrt(1.0 + tilt * f / (B / 2)))[:, None]
+    shape = lambda x: np.fft.ifft(np.fft.fft(x, axis=0) * amp, axis=0)
+    return shape(vv), shape(vh)
+
+
+def test_equalisation_removes_a_spectral_tilt():
+    vv, vh = _tilted(4.0, 0.5, 0.6 * np.exp(0.7j) * np.sqrt(2.0), tilt=0.2)
+    raw = split_sublooks(vv, vh, DT, SubLookConfig(equalize=False))
+    eq = split_sublooks(vv, vh, DT, SubLookConfig(equalize=True))
+    db = lambda a, b: 10 * np.log10(np.mean(np.abs(a) ** 2) / np.mean(np.abs(b) ** 2))
+    assert abs(db(raw.a_vv, raw.b_vv)) > 0.5                       # the tilt shows up as an A/B offset
+    assert abs(db(eq.a_vv, eq.b_vv)) < 0.02                        # and is gone after equalisation
+    p_in = np.mean(np.abs(vv) ** 2)
+    assert np.mean(np.abs(eq.a_vv) ** 2) == pytest.approx(p_in, rel=0.005)
+    assert eq.gains["a_vv"] > 1.0 > eq.gains["b_vv"]
+    assert raw.gains == {k: 1.0 for k in raw.gains}
+
+
+def test_equalisation_leaves_coherence_and_phase_unchanged():
+    c12 = 0.6 * np.exp(0.7j) * np.sqrt(4.0 * 0.5)
+    vv, vh = _tilted(4.0, 0.5, c12, tilt=0.2, seed=1)
+    raw = split_sublooks(vv, vh, DT, SubLookConfig(equalize=False))
+    eq = split_sublooks(vv, vh, DT, SubLookConfig(equalize=True))
+
+    def gamma_phase(a, b):
+        c = np.mean(a * np.conj(b))
+        return abs(c) / np.sqrt(np.mean(np.abs(a) ** 2) * np.mean(np.abs(b) ** 2)), np.angle(c)
+
+    for look in ("a", "b"):
+        g0, p0 = gamma_phase(getattr(raw, f"{look}_vv"), getattr(raw, f"{look}_vh"))
+        g1, p1 = gamma_phase(getattr(eq, f"{look}_vv"), getattr(eq, f"{look}_vh"))
+        assert g1 == pytest.approx(g0, abs=1e-4) and p1 == pytest.approx(p0, abs=1e-4)
+
+
+def test_absurd_equalisation_gain_is_refused():
+    t = np.arange(N) * DT
+    tone = np.tile(np.exp(2j * np.pi * (-100.0) * t)[:, None], (1, 8))
+    with pytest.warns(UserWarning, match="equalisation gain"):
+        sl = split_sublooks(tone, tone, DT, SubLookConfig(equalize=True))
+    assert sl.gains["b_vv"] == 1.0
+    assert np.mean(np.abs(sl.a_vv) ** 2) > 1e3 * np.mean(np.abs(sl.b_vv) ** 2)
+
+
+def test_c12_speckle_correlation_detects_shared_speckle():
+    c12 = 0.6 * np.exp(0.7j) * np.sqrt(2.0)
+    vv, vh = shaped_dualpol(4.0, 0.5, c12, seed=7)
+    ok = split_sublooks(vv, vh, DT, SubLookConfig(guard_hz=10.0))
+    assert c12_speckle_correlation(ok.a_vv, ok.a_vh, ok.b_vv, ok.b_vh) < 0.03
+    overlap = split_sublooks(vv, vh, DT, SubLookConfig(guard_hz=-80.0))     # the bands share 80 Hz
+    assert c12_speckle_correlation(overlap.a_vv, overlap.a_vh, overlap.b_vv, overlap.b_vh) > 0.15
