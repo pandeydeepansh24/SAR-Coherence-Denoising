@@ -1,0 +1,75 @@
+# Training regions for the S1A_IW_SLC__1SDV_20180125T141553_... product.
+# lines / samples are ABSOLUTE TIFF coordinates, [start, stop), taken from the quick-look tile tables
+# (a tile is 128 lines x 1024 samples). Split = train / val / test, decided per REGION.
+#
+# Evidence (quick-look, 8 x 64 blocks): IW1 has the strongest coherent land (gamma_p90 0.4-0.57, VH 10-15 dB
+# above noise). IW2 burst 0 is weakly coherent (gamma_p90 0.2-0.32) but clean. IW3 is noise-dominated
+# (VH power/noise median 1.7 dB, no block with |gamma| > 0.3) and is not used.
+#
+# The test region is a single tile and is PROVISIONAL: replace it by a region of a second SLC product.
+
+patch:
+  rows: 64              # look rows (azimuth, already decimated by 2)
+  cols: 512             # range samples
+  stride_rows: 32       # overlapping patches are NOT independent samples
+  stride_cols: 256
+  min_valid: 0.99
+  gamma_threshold: 0.3
+  coherent_frac: 0.15
+  weak_frac: 0.03
+  ml_window: [9, 65]
+
+buffer:                 # minimum gap between regions of different splits
+  lines: 128            # azimuth lines (compared in azimuth TIME, so burst overlaps count)
+  samples: 1024
+
+preprocess:
+  trim_rows: 32         # look rows masked at both burst ends
+  column_margin: 64     # extra range samples processed around a region, then cropped
+
+negatives:              # incoherent tiles (sea, dark areas, ships) so the model learns not to invent coherence
+  count: 40
+  swaths: [iw1, iw2]
+  max_gamma_p90: 0.12
+  fractions: [0.7, 0.15, 0.15]    # train / val / test
+
+regions:
+  - name: r1_iw1_b2
+    split: train
+    swath: iw1
+    burst: 2
+    lines: [3015, 4423]
+    samples: [11563, 17707]
+    note: main coherent land block (18 of the top-25 quick-look tiles)
+
+  - name: r2_iw1_b4
+    split: val
+    swath: iw1
+    burst: 4
+    lines: [6520, 6904]
+    samples: [3371, 6443]
+    note: second coherent area, 4 tiles
+
+  - name: r3_iw1_b4
+    split: test
+    swath: iw1
+    burst: 4
+    lines: [6264, 6392]
+    samples: [9515, 10539]
+    note: single tile, provisional test region
+
+  - name: w1_iw2_b0
+    split: train
+    swath: iw2
+    burst: 0
+    lines: [923, 1307]
+    samples: [1298, 4370]
+    note: weakly coherent land, clean VH
+
+  - name: w2_iw2_b0
+    split: val
+    swath: iw2
+    burst: 0
+    lines: [155, 539]
+    samples: [4370, 5394]
+    note: weakly coherent land, clean VH
