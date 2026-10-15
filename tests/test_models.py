@@ -11,11 +11,12 @@ def test_unet_shape_and_padding():
         assert out.shape == (2, 4, h, w)
 
 
-def test_head_starts_at_unit_power_and_zero_coherence():
+def test_head_starts_near_unit_power_and_low_coherence_but_not_exactly_zero():
     net = UNet(in_ch=6, base=8, depth=2)
-    c11, c22, re, im, g_re, g_im, g = raw_to_covariance(net(torch.randn(1, 6, 16, 32)))
-    assert torch.allclose(c11, torch.ones_like(c11)) and torch.allclose(c22, torch.ones_like(c22))
-    assert g.max() < 1e-3 and re.abs().max() < 1e-3
+    raw = net(torch.randn(1, 6, 16, 32))
+    c11, c22, re, im, g_re, g_im, g = raw_to_covariance(raw)
+    assert raw[:, :2].abs().max() < 1.0 and g.mean() < 0.4          # near C = I
+    assert net.head.weight.abs().sum() > 0                          # a zero head is a saddle at gamma = 0 (see UNet docstring)
 
 
 def test_raw_to_covariance_is_always_a_valid_covariance():

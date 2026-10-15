@@ -18,6 +18,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+HEAD_INIT_STD = 0.05
 LOG_CLAMP = 15.0          # |log C| limit; data are normalised to unit mean so this is never active in practice
 
 
@@ -43,7 +44,10 @@ class ConvBlock(nn.Module):
 class UNet(nn.Module):
     """Plain U-Net. Returns the RAW head output (B, 4, H, W); use raw_to_covariance() on it.
 
-    The head is zero-initialised, so training starts from C11 = C22 = 1 and gamma = 0.
+    The head has a small random init (std HEAD_INIT_STD) and a zero bias, so training starts near C11 = C22 = 1
+    and gamma ~ 0. It must NOT be zero-initialised: with exactly zero weights the network sits on a saddle at
+    gamma = 0 and, when the data contain incoherent areas, never leaves it (seen in simulation: the output
+    stayed at gamma = 0.02 for 1500 steps, while std 0.05 recovered +0.8, -0.8 and 0 within 600).
     H and W need not be multiples of 2**depth: the input is padded (reflect) and the output cropped.
     """
 
@@ -57,7 +61,7 @@ class UNet(nn.Module):
         self.up = nn.ModuleList([nn.ConvTranspose2d(widths[i + 1], widths[i], 2, stride=2) for i in range(depth)])
         self.dec = nn.ModuleList([ConvBlock(2 * widths[i], widths[i]) for i in range(depth)])
         self.head = nn.Conv2d(widths[0], 4, 1)
-        nn.init.zeros_(self.head.weight)
+        nn.init.normal_(self.head.weight, std=HEAD_INIT_STD)
         nn.init.zeros_(self.head.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
