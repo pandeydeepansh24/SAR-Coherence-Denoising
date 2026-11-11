@@ -9,7 +9,7 @@ coherence (|gamma| and phase of C12 = S_VV * conj(S_VH)).
 
 ## Environment and commands
 - macOS arm64, Python 3.14 venv in the repo (`source venv/bin/activate`), `pip install -e .`
-- Tests: `pytest tests -q` (run from repo root; some tests import `tests.test_deramp` / `tests.test_sublooks`). 80 passing.
+- Tests: `pytest tests -q` (run from repo root; some tests import `tests.test_deramp` / `tests.test_sublooks`). 147 passing.
 - Data (outside the repo, never commit it):
   `export SAFE=~/Desktop/S1A_IW_SLC__1SDV_20180125T141553_20180125T141620_020312_022B03_3605.SAFE`
 - Repo is public (GitHub `pandeydeepansh24/SAR-Coherence-Denoising`): no secrets, no data, no venv, no egg-info.
@@ -37,6 +37,13 @@ coherence (|gamma| and phase of C12 = S_VV * conj(S_VH)).
 | scripts/make_showcase.py | done | prof-facing before/after figure: single look vs 5x33 boxcar vs network vs 9x65 boxcar reference of the other look (single-look coherence is |gamma|=1 by construction, so shown as a note, not a map) |
 | scripts/make_before_after.py | done | talk figure, BEFORE left / AFTER right: intensity composite (single look or boxcar vs network) with ENL in an auto-chosen flat box, and |gamma| (5x33 boxcar vs network) with sign agreement / phase error vs the independent look B |
 | evaluate.py | done | `python -m sar_denoise.evaluate --run RUN --split val`: net vs net_nocoh vs boxcar (full/diag) NLL per class, coherence gain, sign agreement, phase error, false coherence |
+| sim_scene.py | done | SIMULATION experiment (TASK_simulation.md): `make_scene` (Voronoi fields, texture, roads, point scatterers with |gamma| 0.95), `observe` (single look + VH thermal noise), `homogeneous_mask` (ENL area), `check_truth` |
+| complex_models.py | done | `ComplexUNet` (Trabelsi-style: block-weight complex conv, CReLU, bmm complex whitening GroupNorm, avg-pool, complex transposed conv) -> existing PSD head |
+| sim_losses.py | done | `kl_map` / `kl_loss`: closed-form 2x2 KL(CN(0,C_true) || CN(0,C_hat)); invariant to C -> D C D |
+| sim_train.py | done | `python -m sar_denoise.sim_train --model complex|real --out-dir RUN`; fresh scenes every step, fixed seeded val, best.pt by val KL, `--points-per-10k` |
+| sim_metrics.py | done | ENL, PSNR (VV dB), complex SSIM on gamma (NOT sensitive to a constant phase offset), |gamma| bins, phase error, point-scatterer ring counts |
+| sim_eval.py | done | `python -m sar_denoise.sim_eval --complex A/best.pt --real B/best.pt --out-dir FIG`: showcase_main/all, point_zoom, gamma_bias PNGs + metrics.md/json |
+| scripts/check_sim_truth.py | done | averaging 1000 realisations recovers designed |gamma| (fields within 0.0013, points 0.0033) |
 
 Config: `configs/default.yaml` (`data.safe_dir`), `configs/regions.yaml` (train/val/test regions, patch size, buffers), `pyproject.toml` (setuptools, src layout), `requirements.txt`.
 
@@ -86,6 +93,12 @@ CLI examples:
 - Default split: train R1 + w1, val R2 + w2, test R3 (single tile, provisional: replace by a region of a second SLC product).
 - Estimated strongly coherent non-overlapping 64 x 512 patches: about 50 in total. Overlapping patches (stride 32 x 256) are not independent.
 - Neighbouring bursts overlap on the ground (~165 lines): split by region and check distances in azimuth time, not line number.
+
+## Simulation experiment (measured, 2026-11-11)
+- Speed on M3/MPS, B=8, 128x128: complex U-Net base 16 (0.97 M params) ~0.5 s/step, real U-Net base 24 (1.09 M) ~0.15 s/step.
+- Complex net learns coherence only after ~300 steps (it must form S_VV S_VH* itself); at 1000 steps on 6 test scenes:
+  ENL 89, PSNR 26.4 dB, complex SSIM 0.87, phase err 7.8 deg (boxcar 5x5: 24, 26.2, 0.79, 9.3).
+- Weak spot: point scatterers smeared (~ -10 dB peak) because points are ~0.02% of pixels; `--points-per-10k 6` added, untested.
 
 ## Next steps
 1. Run `scripts/make_patches.py` on the real product, inspect the class counts per split in the printed summary and look at a few
