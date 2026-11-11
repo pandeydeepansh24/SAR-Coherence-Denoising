@@ -1,0 +1,23 @@
+SHOWCASE slide (showcase scene, 256x256)
+  Noisy (single look)          ENL = 1.0   PSNR = 14.8 dB   CSSIM = 0.35
+  Complex U-Net                ENL = 81.0   PSNR = 29.7 dB   CSSIM = 0.92
+
+POINT SCATTERERS slide (zoomed point | test-set average over all points)
+  peak ratio I_hat/I : noisy 0.98 | despeckled 0.87    (test, from mean dB error: noisy 1.00 | despeckled 0.83)
+  bright px in ring  : noisy 13 / 188 | despeckled 0 / 188    (test mean per point: noisy 10.6 | despeckled 0.4)
+
+QUANTITATIVE table (20 test scenes of 256x256)
+  method                      ENL     PSNR(dB)  CSSIM   |g| RMSE  phase err (rad)
+  Noisy (single look)            1.0     15.8   0.285    0.619    0.765
+  5x5 boxcar                    25.6     26.3   0.787    0.163    0.173
+  Real U-Net (C2 input)        126.4     30.0   0.935    0.095    0.063
+  Complex U-Net                 92.8     28.9   0.892    0.120    0.106
+  (phase error: median |arg(g_hat g*)| where true |g| > 0.3, mean over scenes; |g| RMSE over all non-point pixels)
+
+TRUTH CHECK slide: M = 1000, 36 fields (incl. roads) + 16 point scatterers; max ||g| error| 0.0013 (fields), 0.0033 (points); max phase error (|g|>0.2) 0.23 deg
+
+TRAINING table
+  Complex U-Net            depth 3, base 16 complex channels, 967,396 parameters, 3000 steps, 22.6 min, best val KL 0.1288 (step 2750)
+  Real U-Net (C2 input)    depth 3, base 24 channels, 1,086,028 parameters, 3000 steps, 8.2 min, best val KL 0.0815 (step 3000)
+  patch 128x128, batch 8, AdamW lr 1e-3 (100-step warm-up, cosine decay), weight decay 1e-4, grad clip 1.0, Apple M3 (MPS)
+  boxcar window 5x5
