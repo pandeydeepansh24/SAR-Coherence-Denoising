@@ -60,3 +60,17 @@ def test_script_runs_end_to_end_on_a_region_archive(regions_dir, tmp_path, capsy
               "--patch-cols", "64"])
     text = capsys.readouterr().out
     assert png.exists() and png.stat().st_size > 5000 and "sign agreement" in text
+
+
+def test_showcase_script_runs_with_and_without_a_crop(regions_dir, tmp_path):
+    run = tmp_path / "run"
+    train(regions_dir, run, steps=10, batch_size=4, base=8, depth=2, device="cpu", eval_every=10, patch_cfg=CFG,
+          log=lambda *_: None)
+    spec = importlib.util.spec_from_file_location("showcase_script", SCRIPT.with_name("make_showcase.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for name, crop in (("full", []), ("crop", ["0", "32", "0", "128"])):
+        png = tmp_path / f"{name}.png"
+        mod.main([str(regions_dir / "va_pos.npz"), "--run", str(run), "--out", str(png), "--patch-rows", "16",
+                  "--patch-cols", "64"] + (["--crop"] + crop if crop else []))
+        assert png.exists() and png.stat().st_size > 5000
